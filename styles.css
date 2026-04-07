@@ -620,66 +620,79 @@ body {
 .bases-kanban-filter-bar {
 	display: flex;
 	flex-direction: column;
-	gap: var(--size-2-2);
-	padding: var(--size-2-2) var(--size-4-2);
+	gap: 2px;
+	padding: 2px var(--size-4-2);
 	flex-shrink: 0;
+}
+
+.bases-kanban-filter-header {
+	display: flex;
+	justify-content: flex-start;
+}
+
+.bases-kanban-filter-clear-btn {
+	padding: 0 4px;
+	border-radius: var(--radius-s);
+	border: none;
+	background-color: transparent;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+	line-height: 1.4;
+	height: 20px;
+}
+
+.bases-kanban-filter-clear-btn:hover {
+	color: var(--text-muted);
+}
+
+.bases-kanban-filter-clear-btn.is-disabled {
+	opacity: 0.4;
+	cursor: default;
 }
 
 .bases-kanban-filter-row {
 	display: flex;
 	align-items: center;
-	gap: var(--size-4-2);
+	gap: var(--size-2-2);
+	line-height: 1;
 }
 
 .bases-kanban-filter-row-label {
 	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	min-width: 60px;
+	color: var(--text-faint);
+	min-width: 52px;
 	flex-shrink: 0;
 }
 
 .bases-kanban-filter-buttons {
 	display: flex;
 	flex-wrap: wrap;
-	gap: var(--size-2-1);
+	gap: 3px;
 }
 
 .bases-kanban-filter-btn {
-	padding: 2px 10px;
+	padding: 1px 12px;
 	border-radius: var(--radius-s);
-	border: 1px solid var(--background-modifier-border);
-	background-color: var(--background-primary);
-	color: var(--text-muted);
+	border: none;
+	background-color: transparent;
+	color: var(--text-faint);
 	font-size: var(--font-ui-smaller);
 	cursor: pointer;
 	transition: all 0.1s ease;
+	height: 20px;
+	line-height: 1;
 }
 
 .bases-kanban-filter-btn:hover {
-	border-color: var(--interactive-accent);
-	color: var(--text-normal);
+	color: var(--text-muted);
+	background-color: var(--background-modifier-hover);
 }
 
 .bases-kanban-filter-btn.is-active {
 	background-color: var(--interactive-accent);
 	border-color: var(--interactive-accent);
 	color: var(--text-on-accent);
-}
-
-.bases-kanban-filter-clear-btn {
-	align-self: flex-start;
-	padding: 2px 10px;
-	border-radius: var(--radius-s);
-	border: 1px solid var(--background-modifier-border);
-	background-color: transparent;
-	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
-	cursor: pointer;
-}
-
-.bases-kanban-filter-clear-btn:hover {
-	color: var(--text-normal);
-	background-color: var(--background-modifier-hover);
 }
 
 /* Filter config panel */

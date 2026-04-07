@@ -1050,6 +1050,21 @@ export class KanbanView extends BasesView {
 	private renderFilterBar(parentEl: HTMLElement, filterProps: string[]): void {
 		const barEl = parentEl.createDiv({ cls: 'bases-kanban-filter-bar' });
 
+		// Clear button always shown above filter rows
+		const headerEl = barEl.createDiv({ cls: 'bases-kanban-filter-header' });
+		const clearBtn = headerEl.createEl('button', {
+			text: 'Clear',
+			cls: 'bases-kanban-filter-clear-btn',
+		});
+		if (this.hasActiveFilters()) {
+			clearBtn.addEventListener('click', () => {
+				this.activeFilters.clear();
+				this.render();
+			});
+		} else {
+			clearBtn.addClass('is-disabled');
+		}
+
 		for (const propName of filterProps) {
 			const rowEl = barEl.createDiv({ cls: 'bases-kanban-filter-row' });
 			rowEl.createSpan({ text: propName, cls: 'bases-kanban-filter-row-label' });
@@ -1077,18 +1092,6 @@ export class KanbanView extends BasesView {
 					this.render();
 				});
 			}
-		}
-
-		// Clear all button (only show if any filter is active)
-		if (this.hasActiveFilters()) {
-			const clearBtn = barEl.createEl('button', {
-				text: 'Clear filters',
-				cls: 'bases-kanban-filter-clear-btn',
-			});
-			clearBtn.addEventListener('click', () => {
-				this.activeFilters.clear();
-				this.render();
-			});
 		}
 	}
 
