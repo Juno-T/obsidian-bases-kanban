@@ -309,6 +309,25 @@ body {
 	max-width: 500px;
 }
 
+.bases-kanban-add-card-modal {
+	max-width: 500px;
+}
+
+.bases-kanban-add-card-props {
+	margin-bottom: var(--size-4-2);
+}
+
+.bases-kanban-add-card-props h4 {
+	margin: var(--size-4-2) 0 var(--size-2-1) 0;
+	font-size: var(--font-ui-small);
+	color: var(--text-muted);
+}
+
+.bases-kanban-field-readonly {
+	opacity: 0.6;
+	cursor: not-allowed;
+}
+
 .bases-kanban-file-list {
 	max-height: 300px;
 	overflow-y: auto;
@@ -594,92 +613,4 @@ body {
 	background-color: var(--background-primary);
 	color: var(--text-normal);
 	font-size: var(--font-ui-smaller);
-}
-
-/* ==================== Card Edit Modal ==================== */
-
-.bases-kanban-card-edit-modal {
-	width: 700px;
-	max-width: 90vw;
-	height: 80vh;
-	max-height: 80vh;
-}
-
-.bases-kanban-card-edit-content {
-	display: flex;
-	flex-direction: column;
-	height: 100%;
-	gap: var(--size-4-2);
-}
-
-.bases-kanban-card-edit-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	flex-shrink: 0;
-}
-
-.bases-kanban-card-edit-header h3 {
-	margin: 0;
-}
-
-.bases-kanban-card-edit-props {
-	display: flex;
-	flex-direction: column;
-	gap: var(--size-2-1);
-	padding: var(--size-4-2);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background-color: var(--background-secondary);
-	flex-shrink: 0;
-}
-
-.bases-kanban-card-edit-prop-row {
-	display: flex;
-	align-items: center;
-	gap: var(--size-4-2);
-}
-
-.bases-kanban-card-edit-prop-key {
-	font-size: var(--font-ui-smaller);
-	color: var(--text-muted);
-	min-width: 80px;
-	flex-shrink: 0;
-}
-
-.bases-kanban-card-edit-prop-value {
-	flex: 1;
-	padding: var(--size-2-1) var(--size-2-2);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background-color: var(--background-primary);
-	color: var(--text-normal);
-	font-size: var(--font-ui-small);
-}
-
-.bases-kanban-card-edit-body {
-	flex: 1;
-	min-height: 0;
-	padding: var(--size-4-2);
-	border: 1px solid var(--background-modifier-border);
-	border-radius: var(--radius-s);
-	background-color: var(--background-primary);
-	color: var(--text-normal);
-	font-family: var(--font-monospace);
-	font-size: var(--font-ui-small);
-	line-height: 1.5;
-	resize: none;
-	tab-size: 4;
-}
-
-.bases-kanban-card-edit-body:focus {
-	outline: none;
-	border-color: var(--interactive-accent);
-}
-
-.bases-kanban-card-edit-footer {
-	display: flex;
-	justify-content: flex-end;
-	gap: var(--size-4-2);
-	flex-shrink: 0;
 }

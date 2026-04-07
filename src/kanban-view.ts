@@ -247,12 +247,12 @@ export class KanbanView extends BasesView {
 		link.addEventListener('click', (evt) => {
 			evt.preventDefault();
 			if (evt.ctrlKey || evt.metaKey) {
-				// Modifier click: open in full leaf as before
-				void this.app.workspace.openLinkText(filePath, '', true);
+				// Modifier click: open in current tab
+				void this.app.workspace.openLinkText(filePath, '', false);
 			} else {
-				// Normal click: open in edit dialog
-				const modal = new CardEditModal(this.app, entry.file);
-				modal.open();
+				// Normal click: open in popout window
+				const leaf = this.app.workspace.getLeaf('window');
+				void leaf.openFile(entry.file);
 			}
 		});
 
@@ -344,14 +344,33 @@ export class KanbanView extends BasesView {
 	}
 
 	private handleAddCard(columnValue: string | null): void {
-		const modal = new AddCardModal(this.app, (noteName) => {
+		// Collect visible properties (excluding file.name) with their unique values as hints
+		const properties = (this.data?.properties ?? []).filter(p => p !== 'file.name');
+		const propertyFields: AddCardPropertyField[] = [];
+
+		for (const propId of properties) {
+			const name = propId.startsWith('note.') ? propId.substring(5) : propId;
+			// Skip non-note properties (file.*, formula.*)
+			if (!propId.startsWith('note.')) continue;
+
+			const hints = this.collectUniqueValues(name);
+			const isGroupBy = name === this.groupByProperty;
+			propertyFields.push({
+				name,
+				hints,
+				defaultValue: isGroupBy && columnValue !== null ? columnValue : '',
+				readonly: isGroupBy && columnValue !== null,
+			});
+		}
+
+		const modal = new AddCardModal(this.app, propertyFields, (noteName, propValues) => {
 			if (!noteName) return;
-			void this.createCardNote(noteName, columnValue);
+			void this.createCardNote(noteName, columnValue, propValues);
 		});
 		modal.open();
 	}
 
-	private async createCardNote(noteName: string, columnValue: string | null): Promise<void> {
+	private async createCardNote(noteName: string, columnValue: string | null, propValues: Record<string, string>): Promise<void> {
 		const fileName = noteName.endsWith('.md') ? noteName : `${noteName}.md`;
 
 		try {
@@ -362,31 +381,33 @@ export class KanbanView extends BasesView {
 			let content = '';
 			const templatePath = this.getNoteTemplateFromConfig();
 
+			// Build the property map: start with user-entered values, ensure groupBy override
+			const finalProps: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(propValues)) {
+				if (v) finalProps[k] = v;
+			}
+			if (columnValue !== null && this.groupByProperty) {
+				finalProps[this.groupByProperty] = columnValue;
+			}
+
 			if (templatePath) {
 				const template = await this.readTemplateContent(templatePath);
 				if (template) {
-					// Merge: column's groupBy value always overrides the template
-					const fm = { ...template.frontmatter };
-					if (columnValue !== null && this.groupByProperty) {
-						fm[this.groupByProperty] = columnValue;
-					}
+					// Merge: user-entered props override template, column value overrides all
+					const fm = { ...template.frontmatter, ...finalProps };
 
-					// Build frontmatter string
 					const fmLines = Object.entries(fm).map(([k, v]) => `${k}: ${v}`);
 					content = fmLines.length > 0
 						? `---\n${fmLines.join('\n')}\n---\n${template.body}`
 						: template.body;
 				} else {
 					new Notice(`Template not found: ${templatePath}`);
-					// Fall back to default behavior
-					if (columnValue !== null && this.groupByProperty) {
-						content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
-					}
+					const fmLines = Object.entries(finalProps).map(([k, v]) => `${k}: ${v}`);
+					content = fmLines.length > 0 ? `---\n${fmLines.join('\n')}\n---\n\n` : '';
 				}
 			} else {
-				if (columnValue !== null && this.groupByProperty) {
-					content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
-				}
+				const fmLines = Object.entries(finalProps).map(([k, v]) => `${k}: ${v}`);
+				content = fmLines.length > 0 ? `---\n${fmLines.join('\n')}\n---\n\n` : '';
 			}
 
 			const file = await this.app.vault.create(fullPath, content);
@@ -957,13 +978,24 @@ export class KanbanView extends BasesView {
 	}
 }
 
+// Property field definition for the add card modal
+interface AddCardPropertyField {
+	name: string;
+	hints: string[];
+	defaultValue: string;
+	readonly: boolean;
+}
+
 // Modal for adding a new card
 class AddCardModal extends Modal {
-	private onSubmit: (noteName: string) => void;
+	private onSubmit: (noteName: string, propValues: Record<string, string>) => void;
 	private inputEl: HTMLInputElement;
+	private propertyFields: AddCardPropertyField[];
+	private propInputs: Map<string, HTMLInputElement> = new Map();
 
-	constructor(app: App, onSubmit: (noteName: string) => void) {
+	constructor(app: App, propertyFields: AddCardPropertyField[], onSubmit: (noteName: string, propValues: Record<string, string>) => void) {
 		super(app);
+		this.propertyFields = propertyFields;
 		this.onSubmit = onSubmit;
 	}
 
@@ -971,46 +1003,82 @@ class AddCardModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('bases-kanban-modal');
-		
+		contentEl.addClass('bases-kanban-add-card-modal');
+
 		contentEl.createEl('h3', { text: 'Create new card' });
-		
+
 		new Setting(contentEl)
 			.setName('Note name')
 			.addText(text => {
 				this.inputEl = text.inputEl;
-				text.setPlaceholder('Enter note name')
-					.onChange(() => {});
+				text.setPlaceholder('Enter note name');
 			});
-		
+
+		// Property fields
+		if (this.propertyFields.length > 0) {
+			const propsSection = contentEl.createDiv({ cls: 'bases-kanban-add-card-props' });
+			propsSection.createEl('h4', { text: 'Properties' });
+
+			for (const field of this.propertyFields) {
+				const listId = `hint-${field.name}`;
+
+				new Setting(propsSection)
+					.setName(field.name)
+					.addText(text => {
+						const inp = text.inputEl;
+						inp.value = field.defaultValue;
+						inp.placeholder = field.hints.length > 0 ? field.hints.slice(0, 3).join(', ') + '…' : '';
+						if (field.readonly) {
+							inp.readOnly = true;
+							inp.addClass('bases-kanban-field-readonly');
+						}
+						// Link to datalist for hints
+						if (field.hints.length > 0 && !field.readonly) {
+							inp.setAttribute('list', listId);
+						}
+						this.propInputs.set(field.name, inp);
+					});
+
+				// Datalist for autocomplete hints
+				if (field.hints.length > 0 && !field.readonly) {
+					const datalist = propsSection.createEl('datalist', { attr: { id: listId } });
+					for (const hint of field.hints) {
+						datalist.createEl('option', { attr: { value: hint } });
+					}
+				}
+			}
+		}
+
 		new Setting(contentEl)
 			.addButton(btn => btn
 				.setButtonText('Create')
 				.setCta()
-				.onClick(() => {
-					const value = this.inputEl.value.trim();
-					if (value) {
-						this.onSubmit(value);
-						this.close();
-					}
-				}))
+				.onClick(() => this.submit()))
 			.addButton(btn => btn
 				.setButtonText('Cancel')
 				.onClick(() => this.close()));
-		
-		// Focus input
+
 		this.inputEl.focus();
-		
-		// Handle Enter key
+
 		this.inputEl.addEventListener('keydown', (evt) => {
 			if (evt.key === 'Enter') {
 				evt.preventDefault();
-				const value = this.inputEl.value.trim();
-				if (value) {
-					this.onSubmit(value);
-					this.close();
-				}
+				this.submit();
 			}
 		});
+	}
+
+	private submit(): void {
+		const name = this.inputEl.value.trim();
+		if (!name) return;
+
+		const propValues: Record<string, string> = {};
+		for (const [key, inp] of this.propInputs) {
+			propValues[key] = inp.value.trim();
+		}
+
+		this.onSubmit(name, propValues);
+		this.close();
 	}
 
 	onClose() {
@@ -1161,130 +1229,6 @@ class SetPropertyModal extends Modal {
 				.onClick(() => this.close()));
 
 		this.propertyInput.focus();
-	}
-
-	onClose() {
-		const { contentEl } = this;
-		contentEl.empty();
-	}
-}
-
-// Modal for editing a card's note content in-place
-class CardEditModal extends Modal {
-	private file: TFile;
-	private bodyEl: HTMLTextAreaElement;
-	private frontmatterProps: { key: string; inputEl: HTMLInputElement }[] = [];
-	private dirty = false;
-
-	constructor(app: App, file: TFile) {
-		super(app);
-		this.file = file;
-	}
-
-	async onOpen() {
-		const { contentEl, modalEl } = this;
-		contentEl.empty();
-		modalEl.addClass('bases-kanban-card-edit-modal');
-		contentEl.addClass('bases-kanban-card-edit-content');
-
-		// Header with title and open-in-leaf button
-		const headerEl = contentEl.createDiv({ cls: 'bases-kanban-card-edit-header' });
-		headerEl.createEl('h3', { text: this.file.basename });
-
-		const openBtn = headerEl.createEl('button', {
-			cls: 'clickable-icon',
-			attr: { 'aria-label': 'Open in full editor' },
-		});
-		setIcon(openBtn, 'external-link');
-		openBtn.addEventListener('click', () => {
-			void this.app.workspace.openLinkText(this.file.path, '', false);
-			this.close();
-		});
-
-		// Read file
-		const raw = await this.app.vault.read(this.file);
-		const { fm, body } = this.parseFrontmatterAndBody(raw);
-
-		// Frontmatter properties section
-		if (Object.keys(fm).length > 0) {
-			const propsEl = contentEl.createDiv({ cls: 'bases-kanban-card-edit-props' });
-			for (const [key, val] of Object.entries(fm)) {
-				const rowEl = propsEl.createDiv({ cls: 'bases-kanban-card-edit-prop-row' });
-				rowEl.createSpan({ text: key, cls: 'bases-kanban-card-edit-prop-key' });
-				const inputEl = rowEl.createEl('input', {
-					cls: 'bases-kanban-card-edit-prop-value',
-					attr: { type: 'text', value: val },
-				});
-				inputEl.addEventListener('input', () => { this.dirty = true; });
-				this.frontmatterProps.push({ key, inputEl });
-			}
-		}
-
-		// Body textarea
-		this.bodyEl = contentEl.createEl('textarea', {
-			cls: 'bases-kanban-card-edit-body',
-			attr: { placeholder: 'Note body...' },
-		});
-		this.bodyEl.value = body;
-		this.bodyEl.addEventListener('input', () => { this.dirty = true; });
-
-		// Footer with save/cancel
-		const footerEl = contentEl.createDiv({ cls: 'bases-kanban-card-edit-footer' });
-
-		const saveBtn = footerEl.createEl('button', { text: 'Save', cls: 'mod-cta' });
-		saveBtn.addEventListener('click', () => {
-			void this.save();
-		});
-
-		const cancelBtn = footerEl.createEl('button', { text: 'Cancel' });
-		cancelBtn.addEventListener('click', () => { this.close(); });
-
-		// Keyboard shortcut: Ctrl/Cmd+S to save
-		this.scope.register(['Mod'], 'S', (evt) => {
-			evt.preventDefault();
-			void this.save();
-			return false;
-		});
-	}
-
-	private parseFrontmatterAndBody(raw: string): { fm: Record<string, string>; body: string } {
-		const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-		if (!match) return { fm: {}, body: raw };
-
-		const fm: Record<string, string> = {};
-		for (const line of match[1].split('\n')) {
-			const idx = line.indexOf(':');
-			if (idx === -1) continue;
-			const key = line.slice(0, idx).trim();
-			const val = line.slice(idx + 1).trim();
-			if (key) fm[key] = val;
-		}
-		return { fm, body: match[2] };
-	}
-
-	private async save(): Promise<void> {
-		if (!this.dirty) {
-			this.close();
-			return;
-		}
-
-		const fmEntries: string[] = [];
-		for (const { key, inputEl } of this.frontmatterProps) {
-			fmEntries.push(`${key}: ${inputEl.value}`);
-		}
-
-		const body = this.bodyEl.value;
-		let content: string;
-		if (fmEntries.length > 0) {
-			content = `---\n${fmEntries.join('\n')}\n---\n${body}`;
-		} else {
-			content = body;
-		}
-
-		await this.app.vault.modify(this.file, content);
-		new Notice(`Saved "${this.file.basename}"`);
-		this.dirty = false;
-		this.close();
 	}
 
 	onClose() {
