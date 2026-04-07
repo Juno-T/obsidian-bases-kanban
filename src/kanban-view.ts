@@ -38,6 +38,8 @@ export class KanbanView extends BasesView {
 	private groupByProperty: string | null = null;
 	private dragDropManager: DragDropManager;
 	private currentGroups: BasesEntryGroup[] = [];
+	private colorPanelOpen = false;
+	private cachedColorMapping: Record<string, string> = {};
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, plugin: BasesKanbanPlugin) {
 		super(controller);
@@ -98,6 +100,12 @@ export class KanbanView extends BasesView {
 		// Sort groups by saved column order
 		const sortedGroups = this.sortGroupsByColumnOrder(groupedData);
 		this.currentGroups = sortedGroups;
+
+		// Cache color mapping for card rendering
+		this.cachedColorMapping = this.getColorMappingFromConfig();
+
+		// Render color toolbar above the board
+		this.renderColorToolbar(this.containerEl);
 
 		// Render the kanban board
 		const boardEl = this.containerEl.createDiv({ cls: 'bases-kanban-board' });
@@ -210,6 +218,17 @@ export class KanbanView extends BasesView {
 
 	private renderCard(container: HTMLElement, entry: BasesEntry, columnName: string, cardIndex: number): void {
 		const cardEl = container.createDiv({ cls: 'bases-kanban-card' });
+
+		// Apply color border from color mapping
+		const colorProperty = this.getColorPropertyFromConfig();
+		if (colorProperty) {
+			const value = entry.getValue(`note.${colorProperty}` as BasesPropertyId);
+			const valueStr = value && !(value instanceof NullValue) ? value.toString() : '';
+			const color = this.cachedColorMapping[valueStr];
+			if (color) {
+				cardEl.style.borderLeft = '4px solid ' + color;
+			}
+		}
 
 		// Store data attributes for drag & drop
 		cardEl.dataset.filePath = entry.file.path;
@@ -640,6 +659,136 @@ export class KanbanView extends BasesView {
 		this.config?.set('columnOrder', orderString);
 	}
 
+	// ==================== Color Config ====================
+
+	private getColorPropertyFromConfig(): string {
+		return (this.config?.get('colorProperty') as string) ?? '';
+	}
+
+	private getColorMappingFromConfig(): Record<string, string> {
+		const raw = this.config?.get('colorMapping') as string;
+		if (!raw) return {};
+		try {
+			return JSON.parse(raw) as Record<string, string>;
+		} catch {
+			return {};
+		}
+	}
+
+	private setColorProperty(value: string): void {
+		this.config?.set('colorProperty', value);
+	}
+
+	private setColorMapping(mapping: Record<string, string>): void {
+		this.config?.set('colorMapping', JSON.stringify(mapping));
+	}
+
+	private renderColorToolbar(parentEl: HTMLElement): void {
+		const toolbarEl = parentEl.createDiv({ cls: 'bases-kanban-color-toolbar' });
+		const colorProperty = this.getColorPropertyFromConfig();
+
+		const toggleBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-color-toggle clickable-icon',
+			attr: { 'aria-label': 'Color settings' },
+		});
+		setIcon(toggleBtn, 'palette');
+
+		if (colorProperty) {
+			toolbarEl.createSpan({
+				text: 'Color by: ' + colorProperty,
+				cls: 'bases-kanban-color-label',
+			});
+		}
+
+		toggleBtn.addEventListener('click', () => {
+			this.colorPanelOpen = !this.colorPanelOpen;
+			this.render();
+		});
+
+		if (this.colorPanelOpen) {
+			this.renderColorPanel(parentEl);
+		}
+	}
+
+	private renderColorPanel(parentEl: HTMLElement): void {
+		const panelEl = parentEl.createDiv({ cls: 'bases-kanban-color-panel' });
+
+		// Property selector
+		const selectorRow = panelEl.createDiv({ cls: 'bases-kanban-color-selector-row' });
+		selectorRow.createSpan({ text: 'Property:' });
+
+		const selectEl = selectorRow.createEl('select', { cls: 'bases-kanban-color-select' });
+
+		// Empty option
+		selectEl.createEl('option', { text: '(none)', attr: { value: '' } });
+
+		// Populate with visible properties (excluding file.name)
+		const properties = (this.data?.properties ?? []).filter(p => p !== 'file.name');
+		const currentProp = this.getColorPropertyFromConfig();
+
+		for (const propId of properties) {
+			const name = propId.startsWith('note.') ? propId.substring(5) : propId;
+			const optEl = selectEl.createEl('option', { text: name, attr: { value: name } });
+			if (name === currentProp) {
+				optEl.selected = true;
+			}
+		}
+
+		selectEl.addEventListener('change', () => {
+			this.setColorProperty(selectEl.value);
+			this.render();
+		});
+
+		// Show unique values for the selected property
+		if (currentProp) {
+			const mapping = this.getColorMappingFromConfig();
+			const uniqueValues = this.collectUniqueValues(currentProp);
+
+			for (const val of uniqueValues) {
+				const rowEl = panelEl.createDiv({ cls: 'bases-kanban-color-row' });
+
+				const swatchEl = rowEl.createDiv({ cls: 'bases-kanban-color-swatch' });
+				swatchEl.style.backgroundColor = mapping[val] ?? 'transparent';
+
+				rowEl.createSpan({ text: val, cls: 'bases-kanban-color-value-label' });
+
+				const inputEl = rowEl.createEl('input', {
+					cls: 'bases-kanban-color-input',
+					attr: {
+						type: 'text',
+						placeholder: '#3b82f6, hsl(), oklch()',
+						value: mapping[val] ?? '',
+					},
+				});
+
+				inputEl.addEventListener('change', () => {
+					const newMapping = this.getColorMappingFromConfig();
+					const v = inputEl.value.trim();
+					if (v) {
+						newMapping[val] = v;
+					} else {
+						delete newMapping[val];
+					}
+					this.setColorMapping(newMapping);
+					swatchEl.style.backgroundColor = v || 'transparent';
+					// Re-render to apply colors to cards
+					this.render();
+				});
+			}
+		}
+	}
+
+	private collectUniqueValues(propertyName: string): string[] {
+		const values = new Set<string>();
+		for (const entry of this.data?.data ?? []) {
+			const value = entry.getValue(`note.${propertyName}` as BasesPropertyId);
+			if (value && !(value instanceof NullValue)) {
+				values.add(value.toString());
+			}
+		}
+		return [...values].sort();
+	}
+
 	/**
 	 * View options exposed to Bases for configuration persistence.
 	 * 
@@ -657,6 +806,22 @@ export class KanbanView extends BasesView {
 				default: '',
 				placeholder: 'Managed by drag & drop',
 				// Hide this option as it's managed automatically
+				shouldHide: () => true,
+			},
+			{
+				key: 'colorProperty',
+				displayName: 'Color property',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'Property name for card colors',
+				shouldHide: () => true,
+			},
+			{
+				key: 'colorMapping',
+				displayName: 'Color mapping',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'JSON color mapping',
 				shouldHide: () => true,
 			},
 		];
