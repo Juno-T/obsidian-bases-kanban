@@ -489,9 +489,9 @@ body {
 	animation: kanban-drop-highlight 0.5s ease-out;
 }
 
-/* ==================== Color Toolbar & Panel ==================== */
+/* ==================== Toolbar & Panels ==================== */
 
-.bases-kanban-color-toolbar {
+.bases-kanban-toolbar {
 	display: flex;
 	align-items: center;
 	gap: var(--size-4-2);
@@ -499,20 +499,36 @@ body {
 	flex-shrink: 0;
 }
 
-.bases-kanban-color-toggle {
+.bases-kanban-toolbar-btn {
 	padding: var(--size-2-1);
 	border-radius: var(--radius-s);
 	color: var(--text-muted);
 }
 
-.bases-kanban-color-toggle:hover {
+.bases-kanban-toolbar-btn:hover {
 	color: var(--text-normal);
 	background-color: var(--background-modifier-hover);
 }
 
-.bases-kanban-color-label {
+.bases-kanban-toolbar-label {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-muted);
+}
+
+.bases-kanban-toolbar-sep {
+	width: 1px;
+	height: 16px;
+	background-color: var(--background-modifier-border);
+}
+
+.bases-kanban-template-input {
+	flex: 1;
+	padding: var(--size-2-1) var(--size-2-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
 }
 
 .bases-kanban-color-panel {

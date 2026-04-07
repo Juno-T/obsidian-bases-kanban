@@ -39,6 +39,7 @@ export class KanbanView extends BasesView {
 	private dragDropManager: DragDropManager;
 	private currentGroups: BasesEntryGroup[] = [];
 	private colorPanelOpen = false;
+	private templatePanelOpen = false;
 	private cachedColorMapping: Record<string, string> = {};
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, plugin: BasesKanbanPlugin) {
@@ -104,8 +105,8 @@ export class KanbanView extends BasesView {
 		// Cache color mapping for card rendering
 		this.cachedColorMapping = this.getColorMappingFromConfig();
 
-		// Render color toolbar above the board
-		this.renderColorToolbar(this.containerEl);
+		// Render toolbar above the board
+		this.renderToolbar(this.containerEl);
 
 		// Render the kanban board
 		const boardEl = this.containerEl.createDiv({ cls: 'bases-kanban-board' });
@@ -344,27 +345,48 @@ export class KanbanView extends BasesView {
 	}
 
 	private async createCardNote(noteName: string, columnValue: string | null): Promise<void> {
-		// Create the note
 		const fileName = noteName.endsWith('.md') ? noteName : `${noteName}.md`;
-		
+
 		try {
-			// Determine the folder - use current file's folder or root
 			const activeFile = this.app.workspace.getActiveFile();
 			const folder = activeFile?.parent?.path ?? '';
 			const fullPath = folder ? `${folder}/${fileName}` : fileName;
-			
-			// Create file with frontmatter if we have a column value
+
 			let content = '';
-			if (columnValue !== null && this.groupByProperty) {
-				content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
+			const templatePath = this.getNoteTemplateFromConfig();
+
+			if (templatePath) {
+				const template = await this.readTemplateContent(templatePath);
+				if (template) {
+					// Merge: column's groupBy value always overrides the template
+					const fm = { ...template.frontmatter };
+					if (columnValue !== null && this.groupByProperty) {
+						fm[this.groupByProperty] = columnValue;
+					}
+
+					// Build frontmatter string
+					const fmLines = Object.entries(fm).map(([k, v]) => `${k}: ${v}`);
+					content = fmLines.length > 0
+						? `---\n${fmLines.join('\n')}\n---\n${template.body}`
+						: template.body;
+				} else {
+					new Notice(`Template not found: ${templatePath}`);
+					// Fall back to default behavior
+					if (columnValue !== null && this.groupByProperty) {
+						content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
+					}
+				}
+			} else {
+				if (columnValue !== null && this.groupByProperty) {
+					content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
+				}
 			}
-			
+
 			const file = await this.app.vault.create(fullPath, content);
-			
-			// Open the new file
+
 			const leaf = this.app.workspace.getLeaf();
 			await leaf.openFile(file);
-			
+
 			new Notice(`Created "${noteName}"`);
 		} catch (error) {
 			new Notice(`Failed to create note: ${error}`);
@@ -683,30 +705,57 @@ export class KanbanView extends BasesView {
 		this.config?.set('colorMapping', JSON.stringify(mapping));
 	}
 
-	private renderColorToolbar(parentEl: HTMLElement): void {
-		const toolbarEl = parentEl.createDiv({ cls: 'bases-kanban-color-toolbar' });
-		const colorProperty = this.getColorPropertyFromConfig();
+	private renderToolbar(parentEl: HTMLElement): void {
+		const toolbarEl = parentEl.createDiv({ cls: 'bases-kanban-toolbar' });
 
-		const toggleBtn = toolbarEl.createEl('button', {
-			cls: 'bases-kanban-color-toggle clickable-icon',
+		// Color button
+		const colorProperty = this.getColorPropertyFromConfig();
+		const colorBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
 			attr: { 'aria-label': 'Color settings' },
 		});
-		setIcon(toggleBtn, 'palette');
-
+		setIcon(colorBtn, 'palette');
 		if (colorProperty) {
 			toolbarEl.createSpan({
 				text: 'Color by: ' + colorProperty,
-				cls: 'bases-kanban-color-label',
+				cls: 'bases-kanban-toolbar-label',
 			});
 		}
-
-		toggleBtn.addEventListener('click', () => {
+		colorBtn.addEventListener('click', () => {
 			this.colorPanelOpen = !this.colorPanelOpen;
+			if (this.colorPanelOpen) this.templatePanelOpen = false;
 			this.render();
 		});
 
+		// Separator
+		toolbarEl.createDiv({ cls: 'bases-kanban-toolbar-sep' });
+
+		// Template button
+		const templatePath = this.getNoteTemplateFromConfig();
+		const templateBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Note template' },
+		});
+		setIcon(templateBtn, 'file-text');
+		if (templatePath) {
+			const basename = templatePath.split('/').pop()?.replace(/\.md$/, '') ?? templatePath;
+			toolbarEl.createSpan({
+				text: 'Template: ' + basename,
+				cls: 'bases-kanban-toolbar-label',
+			});
+		}
+		templateBtn.addEventListener('click', () => {
+			this.templatePanelOpen = !this.templatePanelOpen;
+			if (this.templatePanelOpen) this.colorPanelOpen = false;
+			this.render();
+		});
+
+		// Render expanded panels
 		if (this.colorPanelOpen) {
 			this.renderColorPanel(parentEl);
+		}
+		if (this.templatePanelOpen) {
+			this.renderTemplatePanel(parentEl);
 		}
 	}
 
@@ -789,6 +838,71 @@ export class KanbanView extends BasesView {
 		return [...values].sort();
 	}
 
+	// ==================== Template Config ====================
+
+	private getNoteTemplateFromConfig(): string {
+		return (this.config?.get('noteTemplate') as string) ?? '';
+	}
+
+	private setNoteTemplate(value: string): void {
+		this.config?.set('noteTemplate', value);
+	}
+
+	private renderTemplatePanel(parentEl: HTMLElement): void {
+		const panelEl = parentEl.createDiv({ cls: 'bases-kanban-color-panel' });
+
+		const row = panelEl.createDiv({ cls: 'bases-kanban-color-selector-row' });
+		row.createSpan({ text: 'Template:' });
+
+		const currentPath = this.getNoteTemplateFromConfig();
+
+		const inputEl = row.createEl('input', {
+			cls: 'bases-kanban-template-input',
+			attr: {
+				type: 'text',
+				placeholder: 'path/to/template.md',
+				value: currentPath,
+			},
+		});
+
+		inputEl.addEventListener('change', () => {
+			this.setNoteTemplate(inputEl.value.trim());
+			this.render();
+		});
+
+		const clearBtn = row.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Clear template' },
+		});
+		setIcon(clearBtn, 'x');
+		clearBtn.addEventListener('click', () => {
+			this.setNoteTemplate('');
+			this.render();
+		});
+	}
+
+	private async readTemplateContent(templatePath: string): Promise<{ frontmatter: Record<string, unknown>; body: string } | null> {
+		const file = this.app.vault.getAbstractFileByPath(templatePath);
+		if (!(file instanceof TFile)) return null;
+
+		const raw = await this.app.vault.read(file);
+		const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+		if (!fmMatch) {
+			return { frontmatter: {}, body: raw };
+		}
+
+		// Parse YAML frontmatter naively (key: value per line)
+		const fm: Record<string, unknown> = {};
+		for (const line of fmMatch[1].split('\n')) {
+			const idx = line.indexOf(':');
+			if (idx === -1) continue;
+			const key = line.slice(0, idx).trim();
+			const val = line.slice(idx + 1).trim();
+			if (key) fm[key] = val;
+		}
+		return { frontmatter: fm, body: fmMatch[2] };
+	}
+
 	/**
 	 * View options exposed to Bases for configuration persistence.
 	 * 
@@ -822,6 +936,14 @@ export class KanbanView extends BasesView {
 				type: 'text' as const,
 				default: '',
 				placeholder: 'JSON color mapping',
+				shouldHide: () => true,
+			},
+			{
+				key: 'noteTemplate',
+				displayName: 'Note template',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'Path to template note',
 				shouldHide: () => true,
 			},
 		];
