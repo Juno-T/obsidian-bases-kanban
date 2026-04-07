@@ -40,7 +40,9 @@ export class KanbanView extends BasesView {
 	private currentGroups: BasesEntryGroup[] = [];
 	private colorPanelOpen = false;
 	private templatePanelOpen = false;
+	private filterPanelOpen = false;
 	private cachedColorMapping: Record<string, string> = {};
+	private activeFilters: Map<string, Set<string>> = new Map();
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, plugin: BasesKanbanPlugin) {
 		super(controller);
@@ -190,10 +192,22 @@ export class KanbanView extends BasesView {
 		// Set up cards container as drop zone
 		this.dragDropManager.setupCardsDropZone(cardsEl, columnName);
 
-		// Render cards with their index for drag & drop
+		// Render cards: matching cards first, then non-matching (dimmed) at bottom
+		const matching: { entry: BasesEntry; index: number }[] = [];
+		const nonMatching: { entry: BasesEntry; index: number }[] = [];
 		group.entries.forEach((entry, cardIndex) => {
-			this.renderCard(cardsEl, entry, columnName, cardIndex);
+			if (this.entryMatchesFilters(entry)) {
+				matching.push({ entry, index: cardIndex });
+			} else {
+				nonMatching.push({ entry, index: cardIndex });
+			}
 		});
+		for (const { entry, index } of matching) {
+			this.renderCard(cardsEl, entry, columnName, index, false);
+		}
+		for (const { entry, index } of nonMatching) {
+			this.renderCard(cardsEl, entry, columnName, index, true);
+		}
 		}
 
 	private renderAddColumnButton(boardEl: HTMLElement): void {
@@ -217,8 +231,12 @@ export class KanbanView extends BasesView {
 		return key.toString() || NO_VALUE_COLUMN;
 	}
 
-	private renderCard(container: HTMLElement, entry: BasesEntry, columnName: string, cardIndex: number): void {
+	private renderCard(container: HTMLElement, entry: BasesEntry, columnName: string, cardIndex: number, dimmed: boolean): void {
 		const cardEl = container.createDiv({ cls: 'bases-kanban-card' });
+
+		if (dimmed) {
+			cardEl.addClass('bases-kanban-card-dimmed');
+		}
 
 		// Apply color border from color mapping
 		const colorProperty = this.getColorPropertyFromConfig();
@@ -412,7 +430,7 @@ export class KanbanView extends BasesView {
 
 			const file = await this.app.vault.create(fullPath, content);
 
-			const leaf = this.app.workspace.getLeaf();
+			const leaf = this.app.workspace.getLeaf('window');
 			await leaf.openFile(file);
 
 			new Notice(`Created "${noteName}"`);
@@ -751,7 +769,7 @@ export class KanbanView extends BasesView {
 		}
 		colorBtn.addEventListener('click', () => {
 			this.colorPanelOpen = !this.colorPanelOpen;
-			if (this.colorPanelOpen) this.templatePanelOpen = false;
+			if (this.colorPanelOpen) { this.templatePanelOpen = false; this.filterPanelOpen = false; }
 			this.render();
 		});
 
@@ -774,7 +792,29 @@ export class KanbanView extends BasesView {
 		}
 		templateBtn.addEventListener('click', () => {
 			this.templatePanelOpen = !this.templatePanelOpen;
-			if (this.templatePanelOpen) this.colorPanelOpen = false;
+			if (this.templatePanelOpen) { this.colorPanelOpen = false; this.filterPanelOpen = false; }
+			this.render();
+		});
+
+		// Separator
+		toolbarEl.createDiv({ cls: 'bases-kanban-toolbar-sep' });
+
+		// Filter config button
+		const filterProps = this.getFilterPropertiesFromConfig();
+		const filterBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Filter bar settings' },
+		});
+		setIcon(filterBtn, 'filter');
+		if (filterProps.length > 0) {
+			toolbarEl.createSpan({
+				text: 'Filters: ' + filterProps.join(', '),
+				cls: 'bases-kanban-toolbar-label',
+			});
+		}
+		filterBtn.addEventListener('click', () => {
+			this.filterPanelOpen = !this.filterPanelOpen;
+			if (this.filterPanelOpen) { this.colorPanelOpen = false; this.templatePanelOpen = false; }
 			this.render();
 		});
 
@@ -784,6 +824,14 @@ export class KanbanView extends BasesView {
 		}
 		if (this.templatePanelOpen) {
 			this.renderTemplatePanel(parentEl);
+		}
+		if (this.filterPanelOpen) {
+			this.renderFilterPanel(parentEl);
+		}
+
+		// Always render the filter bar if filter properties are configured
+		if (filterProps.length > 0) {
+			this.renderFilterBar(parentEl, filterProps);
 		}
 	}
 
@@ -931,6 +979,119 @@ export class KanbanView extends BasesView {
 		return { frontmatter: fm, body: fmMatch[2] };
 	}
 
+	// ==================== Filter Bar ====================
+
+	private getFilterPropertiesFromConfig(): string[] {
+		const raw = (this.config?.get('filterProperties') as string) ?? '';
+		return raw.split(',').map(s => s.trim()).filter(s => s.length > 0);
+	}
+
+	private setFilterProperties(props: string[]): void {
+		this.config?.set('filterProperties', props.join(','));
+	}
+
+	private hasActiveFilters(): boolean {
+		for (const selected of this.activeFilters.values()) {
+			if (selected.size > 0) return true;
+		}
+		return false;
+	}
+
+	private entryMatchesFilters(entry: BasesEntry): boolean {
+		if (!this.hasActiveFilters()) return true;
+
+		// AND across properties, OR within each property
+		for (const [propName, selectedValues] of this.activeFilters) {
+			if (selectedValues.size === 0) continue;
+
+			const value = entry.getValue(`note.${propName}` as BasesPropertyId);
+			const valueStr = value && !(value instanceof NullValue) ? value.toString() : '';
+			if (!selectedValues.has(valueStr)) return false;
+		}
+		return true;
+	}
+
+	private renderFilterPanel(parentEl: HTMLElement): void {
+		const panelEl = parentEl.createDiv({ cls: 'bases-kanban-color-panel' });
+
+		const selectorRow = panelEl.createDiv({ cls: 'bases-kanban-color-selector-row' });
+		selectorRow.createSpan({ text: 'Filter bar properties:' });
+
+		// Show checkboxes for each visible note.* property
+		const properties = (this.data?.properties ?? []).filter(p => p !== 'file.name' && p.startsWith('note.'));
+		const currentFilter = new Set(this.getFilterPropertiesFromConfig());
+
+		const listEl = panelEl.createDiv({ cls: 'bases-kanban-filter-prop-list' });
+		for (const propId of properties) {
+			const name = propId.substring(5);
+			const rowEl = listEl.createDiv({ cls: 'bases-kanban-filter-prop-item' });
+			const cbId = `filter-prop-${name}`;
+			const cb = rowEl.createEl('input', {
+				type: 'checkbox',
+				attr: { id: cbId },
+			});
+			cb.checked = currentFilter.has(name);
+			rowEl.createEl('label', { text: name, attr: { for: cbId } });
+
+			cb.addEventListener('change', () => {
+				if (cb.checked) {
+					currentFilter.add(name);
+				} else {
+					currentFilter.delete(name);
+					// Also clear active filter for this property
+					this.activeFilters.delete(name);
+				}
+				this.setFilterProperties([...currentFilter]);
+				this.render();
+			});
+		}
+	}
+
+	private renderFilterBar(parentEl: HTMLElement, filterProps: string[]): void {
+		const barEl = parentEl.createDiv({ cls: 'bases-kanban-filter-bar' });
+
+		for (const propName of filterProps) {
+			const rowEl = barEl.createDiv({ cls: 'bases-kanban-filter-row' });
+			rowEl.createSpan({ text: propName, cls: 'bases-kanban-filter-row-label' });
+
+			const uniqueValues = this.collectUniqueValues(propName);
+			const selected = this.activeFilters.get(propName) ?? new Set<string>();
+
+			const btnsEl = rowEl.createDiv({ cls: 'bases-kanban-filter-buttons' });
+			for (const val of uniqueValues) {
+				const btn = btnsEl.createEl('button', {
+					text: val,
+					cls: 'bases-kanban-filter-btn',
+				});
+				if (selected.has(val)) {
+					btn.addClass('is-active');
+				}
+				btn.addEventListener('click', () => {
+					const current = this.activeFilters.get(propName) ?? new Set<string>();
+					if (current.has(val)) {
+						current.delete(val);
+					} else {
+						current.add(val);
+					}
+					this.activeFilters.set(propName, current);
+					this.render();
+				});
+			}
+		}
+
+		// Clear all button (only show if any filter is active)
+		if (this.hasActiveFilters()) {
+			const clearBtn = barEl.createEl('button', {
+				text: 'Clear filters',
+				cls: 'bases-kanban-filter-clear-btn',
+			});
+			clearBtn.addEventListener('click', () => {
+				this.activeFilters.clear();
+				this.render();
+			});
+		}
+	}
+
 	/**
 	 * View options exposed to Bases for configuration persistence.
 	 * 
@@ -972,6 +1133,14 @@ export class KanbanView extends BasesView {
 				type: 'text' as const,
 				default: '',
 				placeholder: 'Path to template note',
+				shouldHide: () => true,
+			},
+			{
+				key: 'filterProperties',
+				displayName: 'Filter properties',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'Comma-separated property names for filter bar',
 				shouldHide: () => true,
 			},
 		];
