@@ -38,6 +38,11 @@ export class KanbanView extends BasesView {
 	private groupByProperty: string | null = null;
 	private dragDropManager: DragDropManager;
 	private currentGroups: BasesEntryGroup[] = [];
+	private colorPanelOpen = false;
+	private templatePanelOpen = false;
+	private filterPanelOpen = false;
+	private cachedColorMapping: Record<string, string> = {};
+	private activeFilters: Map<string, Set<string>> = new Map();
 
 	constructor(controller: QueryController, scrollEl: HTMLElement, plugin: BasesKanbanPlugin) {
 		super(controller);
@@ -98,6 +103,12 @@ export class KanbanView extends BasesView {
 		// Sort groups by saved column order
 		const sortedGroups = this.sortGroupsByColumnOrder(groupedData);
 		this.currentGroups = sortedGroups;
+
+		// Cache color mapping for card rendering
+		this.cachedColorMapping = this.getColorMappingFromConfig();
+
+		// Render toolbar above the board
+		this.renderToolbar(this.containerEl);
 
 		// Render the kanban board
 		const boardEl = this.containerEl.createDiv({ cls: 'bases-kanban-board' });
@@ -181,10 +192,22 @@ export class KanbanView extends BasesView {
 		// Set up cards container as drop zone
 		this.dragDropManager.setupCardsDropZone(cardsEl, columnName);
 
-		// Render cards with their index for drag & drop
+		// Render cards: matching cards first, then non-matching (dimmed) at bottom
+		const matching: { entry: BasesEntry; index: number }[] = [];
+		const nonMatching: { entry: BasesEntry; index: number }[] = [];
 		group.entries.forEach((entry, cardIndex) => {
-			this.renderCard(cardsEl, entry, columnName, cardIndex);
+			if (this.entryMatchesFilters(entry)) {
+				matching.push({ entry, index: cardIndex });
+			} else {
+				nonMatching.push({ entry, index: cardIndex });
+			}
 		});
+		for (const { entry, index } of matching) {
+			this.renderCard(cardsEl, entry, columnName, index, false);
+		}
+		for (const { entry, index } of nonMatching) {
+			this.renderCard(cardsEl, entry, columnName, index, true);
+		}
 		}
 
 	private renderAddColumnButton(boardEl: HTMLElement): void {
@@ -208,8 +231,23 @@ export class KanbanView extends BasesView {
 		return key.toString() || NO_VALUE_COLUMN;
 	}
 
-	private renderCard(container: HTMLElement, entry: BasesEntry, columnName: string, cardIndex: number): void {
+	private renderCard(container: HTMLElement, entry: BasesEntry, columnName: string, cardIndex: number, dimmed: boolean): void {
 		const cardEl = container.createDiv({ cls: 'bases-kanban-card' });
+
+		if (dimmed) {
+			cardEl.addClass('bases-kanban-card-dimmed');
+		}
+
+		// Apply color border from color mapping
+		const colorProperty = this.getColorPropertyFromConfig();
+		if (colorProperty) {
+			const value = entry.getValue(`note.${colorProperty}` as BasesPropertyId);
+			const valueStr = value && !(value instanceof NullValue) ? value.toString() : '';
+			const color = this.cachedColorMapping[valueStr];
+			if (color) {
+				cardEl.style.borderLeft = '4px solid ' + color;
+			}
+		}
 
 		// Store data attributes for drag & drop
 		cardEl.dataset.filePath = entry.file.path;
@@ -220,13 +258,20 @@ export class KanbanView extends BasesView {
 		const titleEl = cardEl.createDiv({ cls: 'bases-kanban-card-title' });
 		const filePath = entry.file.path;
 		
-		const link = titleEl.createEl('a', { 
+		const link = titleEl.createEl('a', {
 			text: entry.file.basename,
 			cls: 'internal-link'
 		});
 		link.addEventListener('click', (evt) => {
 			evt.preventDefault();
-			void this.app.workspace.openLinkText(filePath, '', evt.ctrlKey || evt.metaKey);
+			if (evt.ctrlKey || evt.metaKey) {
+				// Modifier click: open in current tab
+				void this.app.workspace.openLinkText(filePath, '', false);
+			} else {
+				// Normal click: open in popout window
+				const leaf = this.app.workspace.getLeaf('window');
+				void leaf.openFile(entry.file);
+			}
 		});
 
 		// Render visible properties from the Properties panel
@@ -317,35 +362,77 @@ export class KanbanView extends BasesView {
 	}
 
 	private handleAddCard(columnValue: string | null): void {
-		const modal = new AddCardModal(this.app, (noteName) => {
+		// Collect visible properties (excluding file.name) with their unique values as hints
+		const properties = (this.data?.properties ?? []).filter(p => p !== 'file.name');
+		const propertyFields: AddCardPropertyField[] = [];
+
+		for (const propId of properties) {
+			const name = propId.startsWith('note.') ? propId.substring(5) : propId;
+			// Skip non-note properties (file.*, formula.*)
+			if (!propId.startsWith('note.')) continue;
+
+			const hints = this.collectUniqueValues(name);
+			const isGroupBy = name === this.groupByProperty;
+			propertyFields.push({
+				name,
+				hints,
+				defaultValue: isGroupBy && columnValue !== null ? columnValue : '',
+				readonly: isGroupBy && columnValue !== null,
+			});
+		}
+
+		const modal = new AddCardModal(this.app, propertyFields, (noteName, propValues) => {
 			if (!noteName) return;
-			void this.createCardNote(noteName, columnValue);
+			void this.createCardNote(noteName, columnValue, propValues);
 		});
 		modal.open();
 	}
 
-	private async createCardNote(noteName: string, columnValue: string | null): Promise<void> {
-		// Create the note
+	private async createCardNote(noteName: string, columnValue: string | null, propValues: Record<string, string>): Promise<void> {
 		const fileName = noteName.endsWith('.md') ? noteName : `${noteName}.md`;
-		
+
 		try {
-			// Determine the folder - use current file's folder or root
 			const activeFile = this.app.workspace.getActiveFile();
 			const folder = activeFile?.parent?.path ?? '';
 			const fullPath = folder ? `${folder}/${fileName}` : fileName;
-			
-			// Create file with frontmatter if we have a column value
+
 			let content = '';
-			if (columnValue !== null && this.groupByProperty) {
-				content = `---\n${this.groupByProperty}: ${columnValue}\n---\n\n`;
+			const templatePath = this.getNoteTemplateFromConfig();
+
+			// Build the property map: start with user-entered values, ensure groupBy override
+			const finalProps: Record<string, unknown> = {};
+			for (const [k, v] of Object.entries(propValues)) {
+				if (v) finalProps[k] = v;
 			}
-			
+			if (columnValue !== null && this.groupByProperty) {
+				finalProps[this.groupByProperty] = columnValue;
+			}
+
+			if (templatePath) {
+				const template = await this.readTemplateContent(templatePath);
+				if (template) {
+					// Merge: user-entered props override template, column value overrides all
+					const fm = { ...template.frontmatter, ...finalProps };
+
+					const fmLines = Object.entries(fm).map(([k, v]) => `${k}: ${v}`);
+					content = fmLines.length > 0
+						? `---\n${fmLines.join('\n')}\n---\n${template.body}`
+						: template.body;
+				} else {
+					new Notice(`Template not found: ${templatePath}`);
+					const fmLines = Object.entries(finalProps).map(([k, v]) => `${k}: ${v}`);
+					content = fmLines.length > 0 ? `---\n${fmLines.join('\n')}\n---\n\n` : '';
+				}
+			} else {
+				const fmLines = Object.entries(finalProps).map(([k, v]) => `${k}: ${v}`);
+				content = fmLines.length > 0 ? `---\n${fmLines.join('\n')}\n---\n\n` : '';
+			}
+
 			const file = await this.app.vault.create(fullPath, content);
-			
-			// Open the new file
-			const leaf = this.app.workspace.getLeaf();
+
+			const leaf = this.app.workspace.getLeaf('window');
 			await leaf.openFile(file);
-			
+
 			new Notice(`Created "${noteName}"`);
 		} catch (error) {
 			new Notice(`Failed to create note: ${error}`);
@@ -640,6 +727,374 @@ export class KanbanView extends BasesView {
 		this.config?.set('columnOrder', orderString);
 	}
 
+	// ==================== Color Config ====================
+
+	private getColorPropertyFromConfig(): string {
+		return (this.config?.get('colorProperty') as string) ?? '';
+	}
+
+	private getColorMappingFromConfig(): Record<string, string> {
+		const raw = this.config?.get('colorMapping') as string;
+		if (!raw) return {};
+		try {
+			return JSON.parse(raw) as Record<string, string>;
+		} catch {
+			return {};
+		}
+	}
+
+	private setColorProperty(value: string): void {
+		this.config?.set('colorProperty', value);
+	}
+
+	private setColorMapping(mapping: Record<string, string>): void {
+		this.config?.set('colorMapping', JSON.stringify(mapping));
+	}
+
+	private renderToolbar(parentEl: HTMLElement): void {
+		const toolbarEl = parentEl.createDiv({ cls: 'bases-kanban-toolbar' });
+
+		// Color button
+		const colorProperty = this.getColorPropertyFromConfig();
+		const colorBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Color settings' },
+		});
+		setIcon(colorBtn, 'palette');
+		if (colorProperty) {
+			toolbarEl.createSpan({
+				text: 'Color by: ' + colorProperty,
+				cls: 'bases-kanban-toolbar-label',
+			});
+		}
+		colorBtn.addEventListener('click', () => {
+			this.colorPanelOpen = !this.colorPanelOpen;
+			if (this.colorPanelOpen) { this.templatePanelOpen = false; this.filterPanelOpen = false; }
+			this.render();
+		});
+
+		// Separator
+		toolbarEl.createDiv({ cls: 'bases-kanban-toolbar-sep' });
+
+		// Template button
+		const templatePath = this.getNoteTemplateFromConfig();
+		const templateBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Note template' },
+		});
+		setIcon(templateBtn, 'file-text');
+		if (templatePath) {
+			const basename = templatePath.split('/').pop()?.replace(/\.md$/, '') ?? templatePath;
+			toolbarEl.createSpan({
+				text: 'Template: ' + basename,
+				cls: 'bases-kanban-toolbar-label',
+			});
+		}
+		templateBtn.addEventListener('click', () => {
+			this.templatePanelOpen = !this.templatePanelOpen;
+			if (this.templatePanelOpen) { this.colorPanelOpen = false; this.filterPanelOpen = false; }
+			this.render();
+		});
+
+		// Separator
+		toolbarEl.createDiv({ cls: 'bases-kanban-toolbar-sep' });
+
+		// Filter config button
+		const filterProps = this.getFilterPropertiesFromConfig();
+		const filterBtn = toolbarEl.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Filter bar settings' },
+		});
+		setIcon(filterBtn, 'filter');
+		if (filterProps.length > 0) {
+			toolbarEl.createSpan({
+				text: 'Filters: ' + filterProps.join(', '),
+				cls: 'bases-kanban-toolbar-label',
+			});
+		}
+		filterBtn.addEventListener('click', () => {
+			this.filterPanelOpen = !this.filterPanelOpen;
+			if (this.filterPanelOpen) { this.colorPanelOpen = false; this.templatePanelOpen = false; }
+			this.render();
+		});
+
+		// Render expanded panels
+		if (this.colorPanelOpen) {
+			this.renderColorPanel(parentEl);
+		}
+		if (this.templatePanelOpen) {
+			this.renderTemplatePanel(parentEl);
+		}
+		if (this.filterPanelOpen) {
+			this.renderFilterPanel(parentEl);
+		}
+
+		// Always render the filter bar if filter properties are configured
+		if (filterProps.length > 0) {
+			this.renderFilterBar(parentEl, filterProps);
+		}
+	}
+
+	private renderColorPanel(parentEl: HTMLElement): void {
+		const panelEl = parentEl.createDiv({ cls: 'bases-kanban-color-panel' });
+
+		// Property selector
+		const selectorRow = panelEl.createDiv({ cls: 'bases-kanban-color-selector-row' });
+		selectorRow.createSpan({ text: 'Property:' });
+
+		const selectEl = selectorRow.createEl('select', { cls: 'bases-kanban-color-select' });
+
+		// Empty option
+		selectEl.createEl('option', { text: '(none)', attr: { value: '' } });
+
+		// Populate with visible properties (excluding file.name)
+		const properties = (this.data?.properties ?? []).filter(p => p !== 'file.name');
+		const currentProp = this.getColorPropertyFromConfig();
+
+		for (const propId of properties) {
+			const name = propId.startsWith('note.') ? propId.substring(5) : propId;
+			const optEl = selectEl.createEl('option', { text: name, attr: { value: name } });
+			if (name === currentProp) {
+				optEl.selected = true;
+			}
+		}
+
+		selectEl.addEventListener('change', () => {
+			this.setColorProperty(selectEl.value);
+			this.render();
+		});
+
+		// Show unique values for the selected property
+		if (currentProp) {
+			const mapping = this.getColorMappingFromConfig();
+			const uniqueValues = this.collectUniqueValues(currentProp);
+
+			for (const val of uniqueValues) {
+				const rowEl = panelEl.createDiv({ cls: 'bases-kanban-color-row' });
+
+				const swatchEl = rowEl.createDiv({ cls: 'bases-kanban-color-swatch' });
+				swatchEl.style.backgroundColor = mapping[val] ?? 'transparent';
+
+				rowEl.createSpan({ text: val, cls: 'bases-kanban-color-value-label' });
+
+				const inputEl = rowEl.createEl('input', {
+					cls: 'bases-kanban-color-input',
+					attr: {
+						type: 'text',
+						placeholder: '#3b82f6, hsl(), oklch()',
+						value: mapping[val] ?? '',
+					},
+				});
+
+				inputEl.addEventListener('change', () => {
+					const newMapping = this.getColorMappingFromConfig();
+					const v = inputEl.value.trim();
+					if (v) {
+						newMapping[val] = v;
+					} else {
+						delete newMapping[val];
+					}
+					this.setColorMapping(newMapping);
+					swatchEl.style.backgroundColor = v || 'transparent';
+					// Re-render to apply colors to cards
+					this.render();
+				});
+			}
+		}
+	}
+
+	private collectUniqueValues(propertyName: string): string[] {
+		const values = new Set<string>();
+		for (const entry of this.data?.data ?? []) {
+			const value = entry.getValue(`note.${propertyName}` as BasesPropertyId);
+			if (value && !(value instanceof NullValue)) {
+				values.add(value.toString());
+			}
+		}
+		return [...values].sort();
+	}
+
+	// ==================== Template Config ====================
+
+	private getNoteTemplateFromConfig(): string {
+		return (this.config?.get('noteTemplate') as string) ?? '';
+	}
+
+	private setNoteTemplate(value: string): void {
+		this.config?.set('noteTemplate', value);
+	}
+
+	private renderTemplatePanel(parentEl: HTMLElement): void {
+		const panelEl = parentEl.createDiv({ cls: 'bases-kanban-color-panel' });
+
+		const row = panelEl.createDiv({ cls: 'bases-kanban-color-selector-row' });
+		row.createSpan({ text: 'Template:' });
+
+		const currentPath = this.getNoteTemplateFromConfig();
+
+		const inputEl = row.createEl('input', {
+			cls: 'bases-kanban-template-input',
+			attr: {
+				type: 'text',
+				placeholder: 'path/to/template.md',
+				value: currentPath,
+			},
+		});
+
+		inputEl.addEventListener('change', () => {
+			this.setNoteTemplate(inputEl.value.trim());
+			this.render();
+		});
+
+		const clearBtn = row.createEl('button', {
+			cls: 'bases-kanban-toolbar-btn clickable-icon',
+			attr: { 'aria-label': 'Clear template' },
+		});
+		setIcon(clearBtn, 'x');
+		clearBtn.addEventListener('click', () => {
+			this.setNoteTemplate('');
+			this.render();
+		});
+	}
+
+	private async readTemplateContent(templatePath: string): Promise<{ frontmatter: Record<string, unknown>; body: string } | null> {
+		const file = this.app.vault.getAbstractFileByPath(templatePath);
+		if (!(file instanceof TFile)) return null;
+
+		const raw = await this.app.vault.read(file);
+		const fmMatch = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+		if (!fmMatch) {
+			return { frontmatter: {}, body: raw };
+		}
+
+		// Parse YAML frontmatter naively (key: value per line)
+		const fm: Record<string, unknown> = {};
+		for (const line of fmMatch[1].split('\n')) {
+			const idx = line.indexOf(':');
+			if (idx === -1) continue;
+			const key = line.slice(0, idx).trim();
+			const val = line.slice(idx + 1).trim();
+			if (key) fm[key] = val;
+		}
+		return { frontmatter: fm, body: fmMatch[2] };
+	}
+
+	// ==================== Filter Bar ====================
+
+	private getFilterPropertiesFromConfig(): string[] {
+		const raw = (this.config?.get('filterProperties') as string) ?? '';
+		return raw.split(',').map(s => s.trim()).filter(s => s.length > 0);
+	}
+
+	private setFilterProperties(props: string[]): void {
+		this.config?.set('filterProperties', props.join(','));
+	}
+
+	private hasActiveFilters(): boolean {
+		for (const selected of this.activeFilters.values()) {
+			if (selected.size > 0) return true;
+		}
+		return false;
+	}
+
+	private entryMatchesFilters(entry: BasesEntry): boolean {
+		if (!this.hasActiveFilters()) return true;
+
+		// AND across properties, OR within each property
+		for (const [propName, selectedValues] of this.activeFilters) {
+			if (selectedValues.size === 0) continue;
+
+			const value = entry.getValue(`note.${propName}` as BasesPropertyId);
+			const valueStr = value && !(value instanceof NullValue) ? value.toString() : '';
+			if (!selectedValues.has(valueStr)) return false;
+		}
+		return true;
+	}
+
+	private renderFilterPanel(parentEl: HTMLElement): void {
+		const panelEl = parentEl.createDiv({ cls: 'bases-kanban-color-panel' });
+
+		const selectorRow = panelEl.createDiv({ cls: 'bases-kanban-color-selector-row' });
+		selectorRow.createSpan({ text: 'Filter bar properties:' });
+
+		// Show checkboxes for each visible note.* property
+		const properties = (this.data?.properties ?? []).filter(p => p !== 'file.name' && p.startsWith('note.'));
+		const currentFilter = new Set(this.getFilterPropertiesFromConfig());
+
+		const listEl = panelEl.createDiv({ cls: 'bases-kanban-filter-prop-list' });
+		for (const propId of properties) {
+			const name = propId.substring(5);
+			const rowEl = listEl.createDiv({ cls: 'bases-kanban-filter-prop-item' });
+			const cbId = `filter-prop-${name}`;
+			const cb = rowEl.createEl('input', {
+				type: 'checkbox',
+				attr: { id: cbId },
+			});
+			cb.checked = currentFilter.has(name);
+			rowEl.createEl('label', { text: name, attr: { for: cbId } });
+
+			cb.addEventListener('change', () => {
+				if (cb.checked) {
+					currentFilter.add(name);
+				} else {
+					currentFilter.delete(name);
+					// Also clear active filter for this property
+					this.activeFilters.delete(name);
+				}
+				this.setFilterProperties([...currentFilter]);
+				this.render();
+			});
+		}
+	}
+
+	private renderFilterBar(parentEl: HTMLElement, filterProps: string[]): void {
+		const barEl = parentEl.createDiv({ cls: 'bases-kanban-filter-bar' });
+
+		// Clear button always shown above filter rows
+		const headerEl = barEl.createDiv({ cls: 'bases-kanban-filter-header' });
+		const clearBtn = headerEl.createEl('button', {
+			text: 'Clear',
+			cls: 'bases-kanban-filter-clear-btn',
+		});
+		if (this.hasActiveFilters()) {
+			clearBtn.addEventListener('click', () => {
+				this.activeFilters.clear();
+				this.render();
+			});
+		} else {
+			clearBtn.addClass('is-disabled');
+		}
+
+		for (const propName of filterProps) {
+			const rowEl = barEl.createDiv({ cls: 'bases-kanban-filter-row' });
+			rowEl.createSpan({ text: propName, cls: 'bases-kanban-filter-row-label' });
+
+			const uniqueValues = this.collectUniqueValues(propName);
+			const selected = this.activeFilters.get(propName) ?? new Set<string>();
+
+			const btnsEl = rowEl.createDiv({ cls: 'bases-kanban-filter-buttons' });
+			for (const val of uniqueValues) {
+				const btn = btnsEl.createEl('button', {
+					text: val,
+					cls: 'bases-kanban-filter-btn',
+				});
+				if (selected.has(val)) {
+					btn.addClass('is-active');
+				}
+				btn.addEventListener('click', () => {
+					const current = this.activeFilters.get(propName) ?? new Set<string>();
+					if (current.has(val)) {
+						current.delete(val);
+					} else {
+						current.add(val);
+					}
+					this.activeFilters.set(propName, current);
+					this.render();
+				});
+			}
+		}
+	}
+
 	/**
 	 * View options exposed to Bases for configuration persistence.
 	 * 
@@ -659,17 +1114,60 @@ export class KanbanView extends BasesView {
 				// Hide this option as it's managed automatically
 				shouldHide: () => true,
 			},
+			{
+				key: 'colorProperty',
+				displayName: 'Color property',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'Property name for card colors',
+				shouldHide: () => true,
+			},
+			{
+				key: 'colorMapping',
+				displayName: 'Color mapping',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'JSON color mapping',
+				shouldHide: () => true,
+			},
+			{
+				key: 'noteTemplate',
+				displayName: 'Note template',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'Path to template note',
+				shouldHide: () => true,
+			},
+			{
+				key: 'filterProperties',
+				displayName: 'Filter properties',
+				type: 'text' as const,
+				default: '',
+				placeholder: 'Comma-separated property names for filter bar',
+				shouldHide: () => true,
+			},
 		];
 	}
 }
 
+// Property field definition for the add card modal
+interface AddCardPropertyField {
+	name: string;
+	hints: string[];
+	defaultValue: string;
+	readonly: boolean;
+}
+
 // Modal for adding a new card
 class AddCardModal extends Modal {
-	private onSubmit: (noteName: string) => void;
+	private onSubmit: (noteName: string, propValues: Record<string, string>) => void;
 	private inputEl: HTMLInputElement;
+	private propertyFields: AddCardPropertyField[];
+	private propInputs: Map<string, HTMLInputElement> = new Map();
 
-	constructor(app: App, onSubmit: (noteName: string) => void) {
+	constructor(app: App, propertyFields: AddCardPropertyField[], onSubmit: (noteName: string, propValues: Record<string, string>) => void) {
 		super(app);
+		this.propertyFields = propertyFields;
 		this.onSubmit = onSubmit;
 	}
 
@@ -677,46 +1175,82 @@ class AddCardModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('bases-kanban-modal');
-		
+		contentEl.addClass('bases-kanban-add-card-modal');
+
 		contentEl.createEl('h3', { text: 'Create new card' });
-		
+
 		new Setting(contentEl)
 			.setName('Note name')
 			.addText(text => {
 				this.inputEl = text.inputEl;
-				text.setPlaceholder('Enter note name')
-					.onChange(() => {});
+				text.setPlaceholder('Enter note name');
 			});
-		
+
+		// Property fields
+		if (this.propertyFields.length > 0) {
+			const propsSection = contentEl.createDiv({ cls: 'bases-kanban-add-card-props' });
+			propsSection.createEl('h4', { text: 'Properties' });
+
+			for (const field of this.propertyFields) {
+				const listId = `hint-${field.name}`;
+
+				new Setting(propsSection)
+					.setName(field.name)
+					.addText(text => {
+						const inp = text.inputEl;
+						inp.value = field.defaultValue;
+						inp.placeholder = field.hints.length > 0 ? field.hints.slice(0, 3).join(', ') + '…' : '';
+						if (field.readonly) {
+							inp.readOnly = true;
+							inp.addClass('bases-kanban-field-readonly');
+						}
+						// Link to datalist for hints
+						if (field.hints.length > 0 && !field.readonly) {
+							inp.setAttribute('list', listId);
+						}
+						this.propInputs.set(field.name, inp);
+					});
+
+				// Datalist for autocomplete hints
+				if (field.hints.length > 0 && !field.readonly) {
+					const datalist = propsSection.createEl('datalist', { attr: { id: listId } });
+					for (const hint of field.hints) {
+						datalist.createEl('option', { attr: { value: hint } });
+					}
+				}
+			}
+		}
+
 		new Setting(contentEl)
 			.addButton(btn => btn
 				.setButtonText('Create')
 				.setCta()
-				.onClick(() => {
-					const value = this.inputEl.value.trim();
-					if (value) {
-						this.onSubmit(value);
-						this.close();
-					}
-				}))
+				.onClick(() => this.submit()))
 			.addButton(btn => btn
 				.setButtonText('Cancel')
 				.onClick(() => this.close()));
-		
-		// Focus input
+
 		this.inputEl.focus();
-		
-		// Handle Enter key
+
 		this.inputEl.addEventListener('keydown', (evt) => {
 			if (evt.key === 'Enter') {
 				evt.preventDefault();
-				const value = this.inputEl.value.trim();
-				if (value) {
-					this.onSubmit(value);
-					this.close();
-				}
+				this.submit();
 			}
 		});
+	}
+
+	private submit(): void {
+		const name = this.inputEl.value.trim();
+		if (!name) return;
+
+		const propValues: Record<string, string> = {};
+		for (const [key, inp] of this.propInputs) {
+			propValues[key] = inp.value.trim();
+		}
+
+		this.onSubmit(name, propValues);
+		this.close();
 	}
 
 	onClose() {
@@ -827,27 +1361,27 @@ class SetPropertyModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('bases-kanban-modal');
-		
+
 		contentEl.createEl('h3', { text: `Set property on ${this.entries.length} files` });
-		contentEl.createEl('p', { 
+		contentEl.createEl('p', {
 			text: 'These files are missing the column property. Set a value to move them to a column.',
 			cls: 'setting-item-description'
 		});
-		
+
 		new Setting(contentEl)
 			.setName('Property name')
 			.addText(text => {
 				this.propertyInput = text.inputEl;
 				text.setPlaceholder('e.g. Status');
 			});
-		
+
 		new Setting(contentEl)
 			.setName('Value')
 			.addText(text => {
 				this.valueInput = text.inputEl;
 				text.setPlaceholder('e.g. Todo');
 			});
-		
+
 		new Setting(contentEl)
 			.addButton(btn => btn
 				.setButtonText('Apply to all')
@@ -865,7 +1399,7 @@ class SetPropertyModal extends Modal {
 			.addButton(btn => btn
 				.setButtonText('Cancel')
 				.onClick(() => this.close()));
-		
+
 		this.propertyInput.focus();
 	}
 
