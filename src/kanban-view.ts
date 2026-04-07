@@ -240,13 +240,20 @@ export class KanbanView extends BasesView {
 		const titleEl = cardEl.createDiv({ cls: 'bases-kanban-card-title' });
 		const filePath = entry.file.path;
 		
-		const link = titleEl.createEl('a', { 
+		const link = titleEl.createEl('a', {
 			text: entry.file.basename,
 			cls: 'internal-link'
 		});
 		link.addEventListener('click', (evt) => {
 			evt.preventDefault();
-			void this.app.workspace.openLinkText(filePath, '', evt.ctrlKey || evt.metaKey);
+			if (evt.ctrlKey || evt.metaKey) {
+				// Modifier click: open in full leaf as before
+				void this.app.workspace.openLinkText(filePath, '', true);
+			} else {
+				// Normal click: open in edit dialog
+				const modal = new CardEditModal(this.app, entry.file);
+				modal.open();
+			}
 		});
 
 		// Render visible properties from the Properties panel
@@ -1114,27 +1121,27 @@ class SetPropertyModal extends Modal {
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('bases-kanban-modal');
-		
+
 		contentEl.createEl('h3', { text: `Set property on ${this.entries.length} files` });
-		contentEl.createEl('p', { 
+		contentEl.createEl('p', {
 			text: 'These files are missing the column property. Set a value to move them to a column.',
 			cls: 'setting-item-description'
 		});
-		
+
 		new Setting(contentEl)
 			.setName('Property name')
 			.addText(text => {
 				this.propertyInput = text.inputEl;
 				text.setPlaceholder('e.g. Status');
 			});
-		
+
 		new Setting(contentEl)
 			.setName('Value')
 			.addText(text => {
 				this.valueInput = text.inputEl;
 				text.setPlaceholder('e.g. Todo');
 			});
-		
+
 		new Setting(contentEl)
 			.addButton(btn => btn
 				.setButtonText('Apply to all')
@@ -1152,8 +1159,132 @@ class SetPropertyModal extends Modal {
 			.addButton(btn => btn
 				.setButtonText('Cancel')
 				.onClick(() => this.close()));
-		
+
 		this.propertyInput.focus();
+	}
+
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
+	}
+}
+
+// Modal for editing a card's note content in-place
+class CardEditModal extends Modal {
+	private file: TFile;
+	private bodyEl: HTMLTextAreaElement;
+	private frontmatterProps: { key: string; inputEl: HTMLInputElement }[] = [];
+	private dirty = false;
+
+	constructor(app: App, file: TFile) {
+		super(app);
+		this.file = file;
+	}
+
+	async onOpen() {
+		const { contentEl, modalEl } = this;
+		contentEl.empty();
+		modalEl.addClass('bases-kanban-card-edit-modal');
+		contentEl.addClass('bases-kanban-card-edit-content');
+
+		// Header with title and open-in-leaf button
+		const headerEl = contentEl.createDiv({ cls: 'bases-kanban-card-edit-header' });
+		headerEl.createEl('h3', { text: this.file.basename });
+
+		const openBtn = headerEl.createEl('button', {
+			cls: 'clickable-icon',
+			attr: { 'aria-label': 'Open in full editor' },
+		});
+		setIcon(openBtn, 'external-link');
+		openBtn.addEventListener('click', () => {
+			void this.app.workspace.openLinkText(this.file.path, '', false);
+			this.close();
+		});
+
+		// Read file
+		const raw = await this.app.vault.read(this.file);
+		const { fm, body } = this.parseFrontmatterAndBody(raw);
+
+		// Frontmatter properties section
+		if (Object.keys(fm).length > 0) {
+			const propsEl = contentEl.createDiv({ cls: 'bases-kanban-card-edit-props' });
+			for (const [key, val] of Object.entries(fm)) {
+				const rowEl = propsEl.createDiv({ cls: 'bases-kanban-card-edit-prop-row' });
+				rowEl.createSpan({ text: key, cls: 'bases-kanban-card-edit-prop-key' });
+				const inputEl = rowEl.createEl('input', {
+					cls: 'bases-kanban-card-edit-prop-value',
+					attr: { type: 'text', value: val },
+				});
+				inputEl.addEventListener('input', () => { this.dirty = true; });
+				this.frontmatterProps.push({ key, inputEl });
+			}
+		}
+
+		// Body textarea
+		this.bodyEl = contentEl.createEl('textarea', {
+			cls: 'bases-kanban-card-edit-body',
+			attr: { placeholder: 'Note body...' },
+		});
+		this.bodyEl.value = body;
+		this.bodyEl.addEventListener('input', () => { this.dirty = true; });
+
+		// Footer with save/cancel
+		const footerEl = contentEl.createDiv({ cls: 'bases-kanban-card-edit-footer' });
+
+		const saveBtn = footerEl.createEl('button', { text: 'Save', cls: 'mod-cta' });
+		saveBtn.addEventListener('click', () => {
+			void this.save();
+		});
+
+		const cancelBtn = footerEl.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => { this.close(); });
+
+		// Keyboard shortcut: Ctrl/Cmd+S to save
+		this.scope.register(['Mod'], 'S', (evt) => {
+			evt.preventDefault();
+			void this.save();
+			return false;
+		});
+	}
+
+	private parseFrontmatterAndBody(raw: string): { fm: Record<string, string>; body: string } {
+		const match = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+		if (!match) return { fm: {}, body: raw };
+
+		const fm: Record<string, string> = {};
+		for (const line of match[1].split('\n')) {
+			const idx = line.indexOf(':');
+			if (idx === -1) continue;
+			const key = line.slice(0, idx).trim();
+			const val = line.slice(idx + 1).trim();
+			if (key) fm[key] = val;
+		}
+		return { fm, body: match[2] };
+	}
+
+	private async save(): Promise<void> {
+		if (!this.dirty) {
+			this.close();
+			return;
+		}
+
+		const fmEntries: string[] = [];
+		for (const { key, inputEl } of this.frontmatterProps) {
+			fmEntries.push(`${key}: ${inputEl.value}`);
+		}
+
+		const body = this.bodyEl.value;
+		let content: string;
+		if (fmEntries.length > 0) {
+			content = `---\n${fmEntries.join('\n')}\n---\n${body}`;
+		} else {
+			content = body;
+		}
+
+		await this.app.vault.modify(this.file, content);
+		new Notice(`Saved "${this.file.basename}"`);
+		this.dirty = false;
+		this.close();
 	}
 
 	onClose() {
