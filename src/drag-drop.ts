@@ -29,7 +29,6 @@ export interface DragDropCallbacks {
 	onCardReorder: (file: TFile, targetColumnName: string, targetIndex: number) => Promise<void>;
 	getColumnNames: () => string[];
 	getGroupByProperty: () => string | null;
-	getSortProperty: () => string | null;
 }
 
 /**
@@ -349,7 +348,6 @@ export class DragDropManager {
 		targetIndex: number
 	): Promise<void> {
 		const groupByProperty = this.callbacks.getGroupByProperty();
-		const sortProperty = this.callbacks.getSortProperty();
 
 		// Moving to different column - update the groupBy property
 		if (sourceColumnName !== targetColumnName) {
@@ -362,8 +360,8 @@ export class DragDropManager {
 			const newValue = targetColumnName === '(No value)' ? '' : targetColumnName;
 			await this.callbacks.onCardMoveToColumn(entry.file, newValue);
 		} 
-		// Reordering within same column - update sort property if configured
-		else if (sortProperty && sourceIndex !== targetIndex) {
+		// Reordering within the same column uses the kanban-managed user order field.
+		else if (sourceIndex !== targetIndex) {
 			// Adjust target index if dragging down (source card will be removed first)
 			let adjustedTargetIndex = targetIndex;
 			if (sourceIndex < targetIndex) {
@@ -486,4 +484,3 @@ export class DragDropManager {
 		this.dragState = null;
 	}
 }
-

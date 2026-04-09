@@ -26,6 +26,7 @@ import { DragDropManager } from './drag-drop';
 
 // Constants
 const NO_VALUE_COLUMN = '(No value)';
+const USER_ORDER_PROPERTY = '_kanban_user_order_';
 
 export const KanbanViewType = 'kanban';
 
@@ -57,7 +58,6 @@ export class KanbanView extends BasesView {
 			onCardReorder: (file, columnName, targetIndex) => this.handleCardReorder(file, columnName, targetIndex),
 			getColumnNames: () => this.getCurrentColumnNames(),
 			getGroupByProperty: () => this.getGroupByPropertyFromConfig(),
-			getSortProperty: () => this.getSortPropertyFromConfig(),
 		});
 	}
 
@@ -516,13 +516,13 @@ export class KanbanView extends BasesView {
 
 	/**
 	 * Handle card being reordered within a column.
-	 * Renumbers all cards in the column with clean integers.
-	 * Respects ascending/descending sort direction.
+	 * Renumbers all cards in the column using a dedicated kanban order property.
+	 * If the view is still sorted by another property, prompt the user to switch it manually.
 	 */
 	private async handleCardReorder(file: TFile, columnName: string, targetIndex: number): Promise<void> {
-		const sortProperty = this.getSortPropertyFromConfig();
-		if (!sortProperty) {
-			return; // No sort property configured, nothing to do
+		const sortDirection = this.ensureUserOrderSortConfig();
+		if (!sortDirection) {
+			return;
 		}
 
 		// Find the column's entries
@@ -544,22 +544,35 @@ export class KanbanView extends BasesView {
 			...otherEntries.slice(targetIndex)
 		];
 
-		// Get sort direction from Bases config
-		const isDescending = this.getSortDirection() === 'DESC';
-
 		// Renumber all cards with clean integers
-		await this.renumberCardsInOrder(newOrder, sortProperty, isDescending);
+		await this.renumberCardsInOrder(newOrder, USER_ORDER_PROPERTY, sortDirection === 'DESC');
 	}
 
 	/**
-	 * Get the sort direction for the sort property (ASC or DESC)
+	 * Warn the user when the view is still sorted by another property.
+	 * Preserves the current direction for `_kanban_user_order_` assignments.
 	 */
-	private getSortDirection(): 'ASC' | 'DESC' {
+	private ensureUserOrderSortConfig(): 'ASC' | 'DESC' | null {
 		const sortConfigs = this.config?.getSort() ?? [];
-		if (sortConfigs.length === 1) {
-			return sortConfigs[0].direction;
+
+		if (sortConfigs.length > 1) {
+			new Notice('Kanban reordering only supports a single sort rule.');
+			return null;
 		}
-		return 'ASC'; // Default to ascending
+
+		const currentSort = sortConfigs[0];
+		const direction = currentSort?.direction ?? 'ASC';
+		const userOrderPropertyId = this.buildFrontmatterPropertyId(USER_ORDER_PROPERTY, currentSort?.property);
+
+		if (!currentSort || currentSort.property !== userOrderPropertyId) {
+			this.showManualSortDialog(direction);
+		}
+
+		return direction;
+	}
+
+	private showManualSortDialog(direction: 'ASC' | 'DESC'): void {
+		new ManualSortConfigModal(this.app, direction).open();
 	}
 
 	/**
@@ -664,16 +677,28 @@ export class KanbanView extends BasesView {
 		}
 		
 		const sortConfig = sortConfigs[0];
-		const propId = sortConfig.property;
-		
-		// Extract the property name from the BasesPropertyId
-		// Format: "note.propertyName" for frontmatter properties
+		return this.extractFrontmatterPropertyName(sortConfig.property);
+	}
+
+	private extractFrontmatterPropertyName(propId: BasesPropertyId): string | null {
 		if (propId.startsWith('note.')) {
 			return propId.substring(5);
 		}
-		
-		// For other property types, we can't reorder via frontmatter
+
+		// Bases `.base` files persist frontmatter properties without a namespace.
+		if (!propId.includes('.')) {
+			return propId;
+		}
+
 		return null;
+	}
+
+	private buildFrontmatterPropertyId(propertyName: string, currentPropertyId?: BasesPropertyId): BasesPropertyId {
+		if (currentPropertyId?.startsWith('note.')) {
+			return `note.${propertyName}`;
+		}
+
+		return propertyName as BasesPropertyId;
 	}
 
 	/**
@@ -1100,7 +1125,7 @@ export class KanbanView extends BasesView {
 	 * 
 	 * Note: groupBy and sort properties are automatically detected from Bases config.
 	 * - groupBy: Uses the "Group by" setting from the Sort menu
-	 * - sort: Uses the sort property from the Sort menu (for in-column reordering)
+	 * - sort: Switched to `_kanban_user_order_` automatically when cards are reordered
 	 * - columnOrder: Persisted automatically when columns are reordered via drag & drop
 	 */
 	static getViewOptions(): ViewOption[] {
@@ -1156,6 +1181,39 @@ interface AddCardPropertyField {
 	hints: string[];
 	defaultValue: string;
 	readonly: boolean;
+}
+
+class ManualSortConfigModal extends Modal {
+	private direction: 'ASC' | 'DESC';
+
+	constructor(app: App, direction: 'ASC' | 'DESC') {
+		super(app);
+		this.direction = direction;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.empty();
+		contentEl.addClass('bases-kanban-modal');
+
+		contentEl.createEl('h3', { text: 'Update kanban sort' });
+		contentEl.createEl('p', {
+			text: `Kanban order values are now being stored in "${USER_ORDER_PROPERTY}", but this view is still sorted by another property.`
+		});
+		contentEl.createEl('p', {
+			text: `Open the Bases Sort menu and change Sort by to "${USER_ORDER_PROPERTY}" with direction ${this.direction}.`
+		});
+
+		new Setting(contentEl)
+			.addButton((btn) => btn
+				.setButtonText('Close')
+				.setCta()
+				.onClick(() => this.close()));
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
 }
 
 // Modal for adding a new card
