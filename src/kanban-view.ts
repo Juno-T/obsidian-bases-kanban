@@ -504,12 +504,20 @@ export class KanbanView extends BasesView {
 			return;
 		}
 
+		const statusUpdatedAtProperty = newColumnValue === ''
+			? null
+			: this.buildStatusUpdatedAtPropertyName(groupByProperty, newColumnValue);
+		const movedAt = new Date().toISOString();
+
 		await this.app.fileManager.processFrontMatter(file, (fm) => {
 			if (newColumnValue === '') {
 				// Moving to "(No value)" column - remove the property
 				delete fm[groupByProperty];
 			} else {
 				fm[groupByProperty] = newColumnValue;
+				if (statusUpdatedAtProperty) {
+					fm[statusUpdatedAtProperty] = movedAt;
+				}
 			}
 		});
 	}
@@ -662,6 +670,18 @@ export class KanbanView extends BasesView {
 	 */
 	private getGroupByPropertyFromConfig(): string | null {
 		return this.groupByProperty;
+	}
+
+	private buildStatusUpdatedAtPropertyName(groupByProperty: string, columnValue: string): string {
+		const normalizeSegment = (value: string): string => {
+			return value
+				.trim()
+				.toLowerCase()
+				.replace(/[^a-z0-9]+/g, '_')
+				.replace(/^_+|_+$/g, '') || 'value';
+		};
+
+		return `_kanban_${normalizeSegment(groupByProperty)}_${normalizeSegment(columnValue)}_updated_at_`;
 	}
 
 	/**
